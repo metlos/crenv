@@ -1,0 +1,9 @@
+## CREnv
+
+This library is meant as a helper for preparing the cluster state when doing
+integration test using https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/envtest[envtest] and
+the Ginkgo + Gomega combo for tests.
+
+It provides the `TestSetup` struct using which one can declare the desired state
+that needs to exist prior to starting a test as well as some utility methods
+to inspect the cluster state and force reconciliations of objects.
