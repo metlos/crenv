@@ -7,3 +7,92 @@ the Ginkgo + Gomega combo for tests.
 It provides the `TestSetup` struct using which one can declare the desired state
 that needs to exist prior to starting a test as well as some utility methods
 to inspect the cluster state and force reconciliations of objects.
+
+### Usage
+
+#### Basic setup 
+
+In your Ginkgo test, declare the desired cluster state like this:
+
+```go
+var _ = Describe("my detailed test", func() {
+    testSetup := crenv.TestSetup{
+        ToCreate: []client.Object{
+            &my.AwesomeCR{
+                ObjectMeta: v1.ObjectMeta{
+                    Name: "my-obj",
+                    Namespace: "default",
+                },
+            },
+        },
+    }
+
+    BeforeEach(func() {
+        var ctx context.Context = ...
+        var cl client.Client = ...
+        testSetup.BeforeEach(ctx, cl, nil)
+    })
+
+    AfterEach(func() {
+        var ctx context.Context = ...
+        testSetup.AfterEach(ctx)
+    }
+
+    // now you can write your tests
+})
+```
+
+This might seem as a bit of a mouthful but it comes with some guarantees:
+
+* `BeforeEach` doesn't let the tests run until all objects in `ToCreate` have non-empty status (if they have one at all).
+   This means that a reconciliation ran at least once for these objects.
+* `AfterEach` deletes all the monitored objects from the cluster (helping with repeatability).
+
+#### Inspecting the cluster
+
+CREnv automatically loads all the monitored objects so that your tests don't need to get resources from the cluster and handle
+the potential errors ad nauseam.
+
+```go
+It("my test", func() {
+    Expect(crenv.GetAll[*my.AwesomeCR](&testSetup.InCluster)).NotTo(BeEmpty())
+}
+```
+
+There is a couple of methods to find the in-cluster object you need to check in your tests:
+* `crenv.Find` - to find an object of given type by its object key.
+* `crenv.FindByNamePrefix` - to find an object of given type by its namespace and name prefix.
+* `crenv.GetAll` - to get all the objects of given type
+* `crenv.First` - one object of given type (for the simple usecases where you expect to have just one object in the cluster)
+
+This should cover the basic needs of the tests but if you need a more elaborate filtering, you can always just read from the cluster directly.
+
+#### Waiting for the cluster to settle
+
+Sometimes, you want to make test some postconditions that should happen as a result of the reconciliation of the custom resource.
+```go
+It("my test", func() {
+    Expect(cl.Update(ctx, myObject)).To(Succeed())
+    testSetup.SettleWithCluster(func(g Gomega) {
+        newState := crenv.Find[*my.AwesomeCR](&testSetup.InCluster, client.ObjectKeyFromObject(myObject))
+        g.Expect(newState.Status.Phase).To(Equal("awesome"))
+    })
+}
+```
+
+At some other times, you may want to actually manually trigger the reconciliation so that the controller does some action.
+
+```go
+It("my test", func() {
+    testSetup.ReconcileWithCluster(func(g Gomega) {
+        newState := crenv.Find[*my.AwesomeCR](&testSetup.InCluster, client.ObjectKeyFromObject(myObject))
+        g.Expect(newState.Status.Phase).To(Equal("awesome"))
+    })
+}
+```
+This will force the reconciliation by updating a random annotation on all monitored objects and wait for the cluster state to settle again.
+
+#### Making sense of the logs
+
+This library extensively logs (using the `sigs.k8s.io/controller-runtime/pkg/log` `FromContext` logger) so that the different stages of the test are
+discernible in the logs from the controllers. This becomes extremely useful when debugging problems involving more than one controller and CRD. 

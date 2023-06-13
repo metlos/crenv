@@ -328,9 +328,12 @@ func (ts *TestSetup) validateClusterEmpty(ctx context.Context, g Gomega) {
 	}
 }
 
-// ReconcileWithCluster triggers the reconciliation and waits for the cluster to settle again. This can be used after
-// a test or a nested Gomega.BeforeEach modifies the behavior and we need to re-sync and wait for the controllers to
-// accommodate for the changed behavior.
+// ReconcileWithCluster triggers the reconciliation and waits for the cluster to settle again.
+// The cluster is considered settled when there are no changes of the objects between
+// consecutive readings of the objects (this happens for all monitored object types).
+// 
+// The cluster is considered settled when there are no changes of the objects between
+// consecutive readings of the objects (this happens for all monitored object types).
 //
 // The `postCondition` is a (potentially `nil`) check that needs to succeed before we can claim the cluster reached the
 // desired state. If it is `nil`, then only the best effort is made to wait for the controllers to finish
@@ -346,7 +349,7 @@ func (ts *TestSetup) ReconcileWithCluster(ctx context.Context, postCondition fun
 	lg.Info("////")
 	lg.Info("////")
 	lg.Info("////")
-	lg.Info("//// Triggering reconciliation with cluster")
+	lg.Info("//// Triggering reconciliation with the cluster")
 	lg.Info("////", "file", filename, "line", line)
 	lg.Info("////")
 	lg.Info("////")
@@ -359,7 +362,46 @@ func (ts *TestSetup) ReconcileWithCluster(ctx context.Context, postCondition fun
 	lg.Info("\\\\\\\\")
 	lg.Info("\\\\\\\\")
 	lg.Info("\\\\\\\\")
-	lg.Info("\\\\\\\\ Finished reconciliation with cluster")
+	lg.Info("\\\\\\\\ Finished reconciliation with the cluster")
+	lg.Info("\\\\\\\\", "file", filename, "line", line)
+	lg.Info("\\\\\\\\")
+	lg.Info("\\\\\\\\")
+	lg.Info("\\\\\\\\")
+	lg.Info("\\\\\\\\")
+}
+
+// SettleWithCluster doesn't trigger the reconciliation (like ReconcileWithCluster does) but merely waits for the cluster to settle.
+// The cluster is considered settled when there are no changes of the objects between
+// consecutive readings of the objects (this happens for all monitored object types).
+//
+// The `postCondition` is a (potentially `nil`) check that needs to succeed before we can claim the cluster reached the
+// desired state. If it is `nil`, then only the best effort is made to wait for the controllers to finish
+// the reconciliation.
+//
+// The `postCondition` can use the `testSetup.InCluster` to access the current state of the objects (which is being
+// updated during this call).
+func (ts *TestSetup) SettleWithCluster(ctx context.Context, postCondition func(Gomega)) {
+	lg := ts.lg(ctx)
+
+	_, filename, line, _ := runtime.Caller(1)
+	lg.Info("////")
+	lg.Info("////")
+	lg.Info("////")
+	lg.Info("////")
+	lg.Info("//// Settling with the cluster")
+	lg.Info("////", "file", filename, "line", line)
+	lg.Info("////")
+	lg.Info("////")
+	lg.Info("////")
+	lg.Info("////")
+
+	ts.settleWithCluster(ctx, false, postCondition)
+
+	lg.Info("\\\\\\\\")
+	lg.Info("\\\\\\\\")
+	lg.Info("\\\\\\\\")
+	lg.Info("\\\\\\\\")
+	lg.Info("\\\\\\\\ Finished settling with the cluster")
 	lg.Info("\\\\\\\\", "file", filename, "line", line)
 	lg.Info("\\\\\\\\")
 	lg.Info("\\\\\\\\")
