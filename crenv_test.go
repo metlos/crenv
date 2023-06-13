@@ -18,7 +18,7 @@ func TestTest(t *testing.T) {
 	assert.NoError(t, err)
 
 	ts := TestSetup{
-		Client: cl,
+		client: cl,
 		MonitoredObjectTypes: []client.Object{
 			&v1.ConfigMap{},
 			&v1.Secret{},

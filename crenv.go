@@ -37,8 +37,6 @@ type ExternalStateHandler interface {
 // TestSetup is a struct using which one can express the desired state of the cluster so that a test can proceed.
 // Use the BeforeEach and AfterEach methods in the corresponding Ginkgo test lifecycle methods to actually run it.
 type TestSetup struct {
-	// Client is the client to use when performing operations against the Kubernetes API.
-	Client client.Client
 	// ToCreate is a list of objects to create during the BeforeEach call.
 	ToCreate []client.Object
 	// InCluster is a set of objects that exist in the cluster. This list contains only objects of the monitored object
@@ -46,8 +44,9 @@ type TestSetup struct {
 	InCluster Objects
 	// Behavior specifies additional hooks to call during BeforeEach.
 	Behavior Behavior
-	// MonitoredObjectTypes is the list of Kunernetes object types to monitor for changes when recording
-	// the cluster state in TestSetup. Only the types of the objects from this list are used.
+	// MonitoredObjectTypes is the list of Kubernetes object types to monitor for changes when recording
+	// the cluster state in TestSetup. Only the types of the objects from this list are used. The object types from
+	// ToCreate are implicitly considered.
 	MonitoredObjectTypes []client.Object
 	// ExternalStateHandler is the handler that is able to capture and restore some external state that is important
 	// to preserve between the test runs.
@@ -55,6 +54,9 @@ type TestSetup struct {
 	// LogLevel the log level to use for the log messages from the TestSetup. These can be useful to debug timing and other
 	// problems during the reconciliations.
 	LogLevel int
+
+	// client to be used in all the methods, set during BeforeEach
+	client client.Client
 
 	monitoredGvks map[reflect.Type][]schema.GroupVersionKind
 }
@@ -85,15 +87,28 @@ func (ts *TestSetup) ensureMonitoredGvks() error {
 
 	ts.monitoredGvks = map[reflect.Type][]schema.GroupVersionKind{}
 
-	for _, blueprint := range ts.MonitoredObjectTypes {
-		gvks, _, err := ts.Client.Scheme().ObjectKinds(blueprint)
+	addToMonitoredGvks := func(obj client.Object) error {
+		gvks, _, err := ts.client.Scheme().ObjectKinds(obj)
 		if err != nil {
 			return err
 		}
 
-		typ := reflect.TypeOf(blueprint)
+		typ := reflect.TypeOf(obj)
 
 		ts.monitoredGvks[typ] = append(ts.monitoredGvks[typ], gvks...)
+		return nil
+	}
+
+	for _, obj := range ts.ToCreate {
+		if err := addToMonitoredGvks(obj); err != nil {
+			return err
+		}
+	}
+
+	for _, obj := range ts.MonitoredObjectTypes {
+		if err := addToMonitoredGvks(obj); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -141,14 +156,29 @@ func GetAll[T client.Object](objects *Objects) []T {
 	ret := []T{}
 	for i := range objects.objects {
 		o := objects.objects[i]
-		_, ok := o.(T)
+		obj, ok := o.(T)
 		if !ok {
 			continue
 		}
-		ret = append(ret, o.(T))
+		ret = append(ret, obj)
 	}
 
 	return ret
+}
+
+// First returns the first object of given type in the provided objects list or nil if there are no objects
+// of the type.
+func First[T client.Object](objects *Objects) *T {
+	for i := range objects.objects {
+		o := objects.objects[i]
+		obj, ok := o.(T)
+		if !ok {
+			continue
+		}
+		return &obj
+	}
+
+	return nil
 }
 
 // TriggerReconciliation updates the provided object with a "random-annon-to-trigger-reconcile" annotation (with
@@ -158,7 +188,7 @@ func (ts *TestSetup) TriggerReconciliation(ctx context.Context, object client.Ob
 	Eventually(func(g Gomega) {
 		// trigger the update of the token to force the reconciliation
 		cpy := object.DeepCopyObject().(client.Object)
-		err := ts.Client.Get(ctx, client.ObjectKeyFromObject(object), cpy)
+		err := ts.client.Get(ctx, client.ObjectKeyFromObject(object), cpy)
 		if errors.IsNotFound(err) {
 			// oh, well, it's gone, no way of reconciling it...
 			lg.Info("wanted to force reconciliation but object is gone",
@@ -178,7 +208,7 @@ func (ts *TestSetup) TriggerReconciliation(ctx context.Context, object client.Ob
 		}
 		annos["random-anno-to-trigger-reconcile"] = string(uuid.NewUUID())
 		cpy.SetAnnotations(annos)
-		g.Expect(ts.Client.Update(ctx, cpy)).To(Succeed())
+		g.Expect(ts.client.Update(ctx, cpy)).To(Succeed())
 	}).Should(Succeed())
 
 	lg.Info("update to force reconciliation succeeded",
@@ -187,8 +217,8 @@ func (ts *TestSetup) TriggerReconciliation(ctx context.Context, object client.Ob
 }
 
 // BeforeEach is where the magic happens. It first checks that the cluster is empty, then calls the external state handler to
-// capture its state, resets it, creates the required objects, and waits for the cluster state to settle (i.e. wait for 
-// the controllers to create all the additional objects and finish all the reconciles). Once this method returns, 
+// capture its state, resets it, creates the required objects, and waits for the cluster state to settle (i.e. wait for
+// the controllers to create all the additional objects and finish all the reconciles). Once this method returns,
 // the TestSetup.InCluster contains the objects of interest as they exist in the cluster after all the reconciliations have been
 // performed at least once after the external state has been reset.
 //
@@ -196,8 +226,14 @@ func (ts *TestSetup) TriggerReconciliation(ctx context.Context, object client.Ob
 // desired state. If it is `nil`, then only the best effort is made to wait for the controllers to finish
 // the reconciliation (basically the only thing guaranteed is that the objects will have a status, i.e.
 // the reconciliation happened at least once).
-func (ts *TestSetup) BeforeEach(ctx context.Context, postCondition func(Gomega)) {
+func (ts *TestSetup) BeforeEach(ctx context.Context, cl client.Client, postCondition func(Gomega)) {
 	start := time.Now()
+
+	ts.client = cl
+
+	// Test that the basic preconditions are met before we even try to start preparing the tests...
+	Expect(ts.ensureMonitoredGvks()).To(Succeed())
+	Expect(ts.monitoredGvks).NotTo(BeEmpty(), "no monitored object types found. Please add some objects to create or explict monitored object types")
 
 	// I've seen some timing issues where beforeeach seems to be executed in parallel with aftereach of the test before
 	// which would cause problems because we assume that the tests run sequentially. Let's just wait here a little, to
@@ -221,7 +257,7 @@ func (ts *TestSetup) BeforeEach(ctx context.Context, postCondition func(Gomega))
 
 	for i := range ts.ToCreate {
 		obj := ts.ToCreate[i]
-		Expect(ts.Client.Create(ctx, obj)).To(Succeed())
+		Expect(ts.client.Create(ctx, obj)).To(Succeed())
 		ts.InCluster.objects = append(ts.InCluster.objects, obj)
 	}
 
@@ -263,9 +299,9 @@ func (ts *TestSetup) AfterEach(ctx context.Context) {
 		for _, gvk := range gvks {
 			list := unstructured.UnstructuredList{}
 			list.SetGroupVersionKind(gvk)
-			Expect(ts.Client.List(ctx, &list)).To(Succeed())
+			Expect(ts.client.List(ctx, &list)).To(Succeed())
 			for _, o := range list.Items {
-				Expect(ts.Client.Delete(ctx, &o)).To(Succeed())
+				Expect(ts.client.Delete(ctx, &o)).To(Succeed())
 			}
 		}
 	}
@@ -286,7 +322,7 @@ func (ts *TestSetup) validateClusterEmpty(ctx context.Context, g Gomega) {
 		for _, gvk := range gvks {
 			list := unstructured.UnstructuredList{}
 			list.SetGroupVersionKind(gvk)
-			g.Expect(ts.Client.List(ctx, &list)).To(Succeed())
+			g.Expect(ts.client.List(ctx, &list)).To(Succeed())
 			g.Expect(list.Items).To(BeEmpty())
 		}
 	}
@@ -337,7 +373,7 @@ func (ts *TestSetup) settleWithCluster(ctx context.Context, forceReconcile bool,
 	waitForStatus := func() {
 		for _, gvks := range ts.monitoredGvks {
 			for _, gvk := range gvks {
-				waitForStatus(ctx, ts.Client, gvk)
+				waitForStatus(ctx, ts.client, gvk)
 			}
 		}
 	}
@@ -486,12 +522,12 @@ func (ts *TestSetup) loadAll(ctx context.Context, gvk schema.GroupVersionKind) {
 	list := unstructured.UnstructuredList{}
 	list.SetGroupVersionKind(gvk)
 
-	Expect(ts.Client.List(ctx, &list)).To(Succeed())
+	Expect(ts.client.List(ctx, &list)).To(Succeed())
 
 	for _, uo := range list.Items {
 		data, err := uo.MarshalJSON()
 		Expect(err).NotTo(HaveOccurred(), "failed to marshal object of kind %s to json", gvk)
-		o, err := ts.Client.Scheme().New(gvk)
+		o, err := ts.client.Scheme().New(gvk)
 		Expect(err).NotTo(HaveOccurred(), "failed to create a new instance of object with gvk %s", gvk)
 		Expect(json.Unmarshal(data, o)).To(Succeed(), "failed to unmarshal unstructured data to an object of kind %s", gvk)
 		ts.InCluster.objects = append(ts.InCluster.objects, o.(client.Object))
@@ -502,7 +538,7 @@ func waitForStatus(ctx context.Context, cl client.Client, gvk schema.GroupVersio
 	test, err := cl.Scheme().New(gvk)
 	Expect(err).NotTo(HaveOccurred(), "failed to obtain a new instance of %s from scheme", gvk.String())
 
-	typ := reflect.TypeOf(test)
+	typ := reflect.TypeOf(test).Elem() // All the implementations I know of implement the client.Object interface on the pointer receiver 
 	// a crude way of determining that a CRD has a status field
 	_, hasStatusField := typ.FieldByName("Status")
 
