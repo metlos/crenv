@@ -184,8 +184,12 @@ func First[T client.Object](objects *Objects) *T {
 // TriggerReconciliation updates the provided object with a "random-annon-to-trigger-reconcile" annotation (with
 // a random value) so that a new reconciliation is performed.
 func (ts *TestSetup) TriggerReconciliation(ctx context.Context, object client.Object) {
+	ts.triggerReconciliation(ctx, Default, object)
+}
+
+func (ts *TestSetup) triggerReconciliation(ctx context.Context, g Gomega, object client.Object) {
 	lg := ts.lg(ctx)
-	Eventually(func(g Gomega) {
+	g.Eventually(func(gg Gomega) {
 		// trigger the update of the token to force the reconciliation
 		cpy := object.DeepCopyObject().(client.Object)
 		err := ts.client.Get(ctx, client.ObjectKeyFromObject(object), cpy)
@@ -200,7 +204,7 @@ func (ts *TestSetup) TriggerReconciliation(ctx context.Context, object client.Ob
 			"object", client.ObjectKeyFromObject(object),
 			"kind", object.GetObjectKind().GroupVersionKind().String())
 
-		Expect(err).NotTo(HaveOccurred())
+		gg.Expect(err).NotTo(HaveOccurred())
 
 		annos := object.GetAnnotations()
 		if annos == nil {
@@ -208,7 +212,7 @@ func (ts *TestSetup) TriggerReconciliation(ctx context.Context, object client.Ob
 		}
 		annos["random-anno-to-trigger-reconcile"] = string(uuid.NewUUID())
 		cpy.SetAnnotations(annos)
-		g.Expect(ts.client.Update(ctx, cpy)).To(Succeed())
+		gg.Expect(ts.client.Update(ctx, cpy)).To(Succeed())
 	}).Should(Succeed())
 
 	lg.Info("update to force reconciliation succeeded",
@@ -463,7 +467,7 @@ func (ts *TestSetup) settleWithCluster(ctx context.Context, forceReconcile bool,
 			}
 
 			for _, o := range ts.InCluster.objects {
-				ts.TriggerReconciliation(ctx, o)
+				ts.triggerReconciliation(ctx, g, o)
 			}
 			now := time.Now()
 			lastReconcile = &now
