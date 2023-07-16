@@ -3,6 +3,7 @@ package crenv
 import (
 	"context"
 	"encoding/json"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"runtime"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/cri-api/pkg/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -305,7 +305,7 @@ func (ts *TestSetup) AfterEach(ctx context.Context) {
 			list.SetGroupVersionKind(gvk)
 			Expect(ts.client.List(ctx, &list)).To(Succeed())
 			for _, o := range list.Items {
-				Expect(ts.client.Delete(ctx, &o)).To(Succeed())
+				Expect(ts.client.Delete(ctx, &o)).To(Or(Succeed(), WithTransform(errors.IsNotFound, BeTrue())))
 			}
 		}
 	}
@@ -335,7 +335,7 @@ func (ts *TestSetup) validateClusterEmpty(ctx context.Context, g Gomega) {
 // ReconcileWithCluster triggers the reconciliation and waits for the cluster to settle again.
 // The cluster is considered settled when there are no changes of the objects between
 // consecutive readings of the objects (this happens for all monitored object types).
-// 
+//
 // The cluster is considered settled when there are no changes of the objects between
 // consecutive readings of the objects (this happens for all monitored object types).
 //
@@ -584,7 +584,7 @@ func waitForStatus(ctx context.Context, cl client.Client, gvk schema.GroupVersio
 	test, err := cl.Scheme().New(gvk)
 	Expect(err).NotTo(HaveOccurred(), "failed to obtain a new instance of %s from scheme", gvk.String())
 
-	typ := reflect.TypeOf(test).Elem() // All the implementations I know of implement the client.Object interface on the pointer receiver 
+	typ := reflect.TypeOf(test).Elem() // All the implementations I know of implement the client.Object interface on the pointer receiver
 	// a crude way of determining that a CRD has a status field
 	_, hasStatusField := typ.FieldByName("Status")
 
