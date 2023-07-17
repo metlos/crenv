@@ -526,11 +526,31 @@ func (ts *TestSetup) settleWithCluster(ctx context.Context, forceReconcile bool,
 }
 
 func findDifferences(origs []client.Object, news []client.Object) string {
-	var diffs []string
+	origsByType := splitByType(origs)
+	newsByType := splitByType(news)
 
+	ret := ""
+
+	for t, os := range origsByType {
+		ns := newsByType[t]
+		d := diffArray(os, ns)
+		if d != "" {
+			if ret != "" {
+				ret += ", "
+			}
+			ret += fmt.Sprintf("objects of type %s: %s", t.Elem().Name(), d)
+		}
+	}
+
+	return ret
+}
+
+func diffArray(origs []client.Object, news []client.Object) string {
 	if len(origs) != len(news) {
 		return "arrays have a different number of elements"
 	}
+
+	var diffs []string
 
 	origMap := map[client.ObjectKey]client.Object{}
 	for _, o := range origs {
@@ -547,6 +567,18 @@ func findDifferences(origs []client.Object, news []client.Object) string {
 	}
 
 	return strings.Join(diffs, ", ")
+}
+
+func splitByType(objs []client.Object) map[reflect.Type][]client.Object {
+	ret := map[reflect.Type][]client.Object{}
+	for i := range objs {
+		obj := objs[i]
+		typ := reflect.TypeOf(obj)
+		objsOfType := ret[typ]
+		objsOfType = append(objsOfType, obj)
+		ret[typ] = objsOfType
+	}
+	return ret
 }
 
 func diff(a client.Object, b client.Object) string {
