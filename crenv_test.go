@@ -1,45 +1,186 @@
 package crenv
 
 import (
-	"context"
-	"encoding/json"
-	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	ctrl "sigs.k8s.io/controller-runtime"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func TestTest(t *testing.T) {
-	cl, err := client.New(ctrl.GetConfigOrDie(), client.Options{})
-	assert.NoError(t, err)
+func TestFindDifferences(t *testing.T) {
+	t.Run("single type", func(t *testing.T) {
+		t.Run("different counts", func(t *testing.T) {
+			diff := findDifferences(
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "husa",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+				},
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+				},
+			)
 
-	ts := TestSetup{
-		client: cl,
-		MonitoredObjectTypes: []client.Object{
-			&v1.ConfigMap{},
-			&v1.Secret{},
-		},
-	}
+			assert.Equal(t, "objects of type ConfigMap: arrays have a different number of elements", diff)
+		})
 
-	assert.NoError(t, ts.ensureMonitoredGvks())
+		t.Run("same count", func(t *testing.T) {
+			diff := findDifferences(
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "husa",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+				},
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "husa",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "e",
+						},
+					},
+				},
+			)
 
-	ul := unstructured.UnstructuredList{}
-	ul.SetGroupVersionKind(ts.monitoredGvks[reflect.TypeOf(&v1.ConfigMap{})][0])
+			assert.Equal(t, "objects of type ConfigMap: /husa: {Data.map[c]: d != e}", diff)
+		})
+	})
 
-	assert.NoError(t, cl.List(context.Background(), &ul))
+	t.Run("multiple types", func(t *testing.T) {
+		t.Run("different counts", func(t *testing.T) {
+			diff := findDifferences(
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "husa",
+						},
+						Data: map[string][]byte{
+							"a": []byte("b"),
+							"c": []byte("d"),
+						},
+					},
+				},
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+				},
+			)
 
-	assert.Greater(t, len(ul.Items), 0)
+			assert.Equal(t, "objects of type Secret: arrays have a different number of elements", diff)
+		})
 
-	ucm := ul.Items[0]
+		t.Run("same count", func(t *testing.T) {
+			diff := findDifferences(
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "husa",
+						},
+						Data: map[string][]byte{
+							"a": []byte("b"),
+							"c": []byte("d"),
+						},
+					},
+				},
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+					&corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "husa",
+						},
+						Data: map[string][]byte{
+							"a": []byte("b"),
+							"c": []byte("e"),
+						},
+					},
+				},
+			)
 
-	data, err := ucm.MarshalJSON()
-	assert.NoError(t, err)
-	cm := &v1.ConfigMap{}
-	assert.NoError(t, json.Unmarshal(data, cm))
-	assert.NotEmpty(t, cm.Name)
-	assert.NotEmpty(t, cm.Namespace)
+			assert.Equal(t, "objects of type Secret: /husa: {Data.map[c].slice[0]: 100 != 101}", diff)
+		})
+	})
 }
