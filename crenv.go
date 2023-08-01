@@ -260,7 +260,7 @@ func (ts *TestSetup) BeforeEach(ctx context.Context, cl client.Client, postCondi
 	}
 
 	for i := range ts.ToCreate {
-		obj := ts.ToCreate[i]
+		obj := ts.ToCreate[i].DeepCopyObject().(client.Object)
 		Expect(ts.client.Create(ctx, obj)).To(Succeed())
 		ts.InCluster.objects = append(ts.InCluster.objects, obj)
 	}

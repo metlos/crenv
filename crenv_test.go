@@ -1,12 +1,17 @@
 package crenv
 
 import (
+	"context"
 	"testing"
 
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestFindDifferences(t *testing.T) {
@@ -184,3 +189,32 @@ func TestFindDifferences(t *testing.T) {
 		})
 	})
 }
+
+func TestSuite(t *testing.T) {
+	RegisterFailHandler(Fail)
+	RunSpecs(t, "CREnv Test Suite")
+}
+
+var _ = Describe("BeforeEach", func() {
+	It("doesn't modify ToCreate objects", func() {
+		ts := TestSetup{
+			ToCreate: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "cm",
+						Namespace: "default",
+					},
+				},
+			},
+		}
+		
+		cl := fake.NewClientBuilder().Build()
+
+		ts.BeforeEach(context.TODO(), cl, nil)
+
+		inCluster := &corev1.ConfigMap{}
+		Expect(cl.Get(context.TODO(), client.ObjectKeyFromObject(ts.ToCreate[0]), inCluster)).To(Succeed())
+		Expect(inCluster.ResourceVersion).NotTo(BeEmpty())
+		Expect(ts.ToCreate[0].GetResourceVersion()).To(BeEmpty())
+	})
+})
