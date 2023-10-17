@@ -100,6 +100,53 @@ func TestFindDifferences(t *testing.T) {
 
 			assert.Equal(t, "objects of type ConfigMap: /husa: {Data.map[c]: d != e}", diff)
 		})
+
+		t.Run("different objects, same count", func(t *testing.T) {
+			diff := findDifferences(
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "husa",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+				},
+				[]client.Object{
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "kachna2",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "d",
+						},
+					},
+					&corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "husa",
+						},
+						Data: map[string]string{
+							"a": "b",
+							"c": "e",
+						},
+					},
+				},
+			)
+
+			assert.Equal(t, "objects of type ConfigMap: /kachna: {not found in the new set}, /kachna2: {not found in the old set}, /husa: {Data.map[c]: d != e}", diff)
+		})
 	})
 
 	t.Run("multiple types", func(t *testing.T) {
@@ -201,13 +248,13 @@ var _ = Describe("BeforeEach", func() {
 			ToCreate: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "cm",
+						Name:      "cm",
 						Namespace: "default",
 					},
 				},
 			},
 		}
-		
+
 		cl := fake.NewClientBuilder().Build()
 
 		ts.BeforeEach(context.TODO(), cl, nil)

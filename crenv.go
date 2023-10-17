@@ -3,13 +3,13 @@ package crenv
 import (
 	"context"
 	"encoding/json"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"runtime"
-	"time"
-
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/go-logr/logr"
 	"github.com/go-test/deep"
@@ -557,10 +557,29 @@ func diffArray(origs []client.Object, news []client.Object) string {
 		origMap[client.ObjectKeyFromObject(o)] = o
 	}
 
-	for _, n := range news {
-		key := client.ObjectKeyFromObject(n)
+	newMap := map[client.ObjectKey]client.Object{}
+	for _, o := range news {
+		newMap[client.ObjectKeyFromObject(o)] = o
+	}
+
+	for k := range origMap {
+		if _, ok := newMap[k]; !ok {
+			diffs = append(diffs, fmt.Sprintf("%v: {not found in the new set}", k))
+			delete(origMap, k)
+		}
+	}
+
+	for k := range newMap {
+		if _, ok := origMap[k]; !ok {
+			diffs = append(diffs, fmt.Sprintf("%v: {not found in the old set}", k))
+			delete(newMap, k)
+		}
+	}
+
+	for key, n := range newMap {
 		o := origMap[key]
 		diff := diff(o, n)
+
 		if len(diff) > 0 {
 			diffs = append(diffs, fmt.Sprintf("%v: {%s}", key, diff))
 		}
