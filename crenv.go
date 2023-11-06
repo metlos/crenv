@@ -55,10 +55,21 @@ type TestSetup struct {
 	// problems during the reconciliations.
 	LogLevel int
 
+	// ReconciliationChecks is map of function using which one can define how to infer that a reconciliation could have happened
+	// from the state of the object. By default, if the object has a "status" field, then its presence is considered a "proof" of
+	// reconciliation, otherwise no check is performed and the objects are considered reconciled. You can use this map to override
+	// that default behavior. By specifying a custom function which should return true if the reconciliation hasn't happened yet.
+	ReconciliationChecks map[client.Object]func(*unstructured.Unstructured) bool
+
 	// client to be used in all the methods, set during BeforeEach
 	client client.Client
 
-	monitoredGvks map[reflect.Type][]schema.GroupVersionKind
+	monitoredGvks map[reflect.Type]gvkDescriptor
+}
+
+type gvkDescriptor struct {
+	reconciliationCheck func(*unstructured.Unstructured) bool
+	gvks                []schema.GroupVersionKind
 }
 
 // Objects is a holder of objects loaded from the cluster that provides some basic utility methods for a strongly typed lookup.
@@ -85,7 +96,7 @@ func (ts *TestSetup) ensureMonitoredGvks() error {
 		return nil
 	}
 
-	ts.monitoredGvks = map[reflect.Type][]schema.GroupVersionKind{}
+	ts.monitoredGvks = map[reflect.Type]gvkDescriptor{}
 
 	addToMonitoredGvks := func(obj client.Object) error {
 		gvks, _, err := ts.client.Scheme().ObjectKinds(obj)
@@ -93,9 +104,30 @@ func (ts *TestSetup) ensureMonitoredGvks() error {
 			return err
 		}
 
-		typ := reflect.TypeOf(obj)
+		typ := reflect.TypeOf(obj).Elem()
 
-		ts.monitoredGvks[typ] = append(ts.monitoredGvks[typ], gvks...)
+		desc, initialized := ts.monitoredGvks[typ]
+
+		if !initialized {
+			rc := ts.ReconciliationChecks[obj]
+			if rc == nil {
+				// if the type as a field that's called "status" in JSON, we use its nullity to check if reconciliation might have happened.
+				for i := 0; i < typ.NumField(); i++ {
+					f := typ.Field(i)
+					jsonTag := f.Tag.Get("json")
+					if strings.HasPrefix(jsonTag, "status") {
+						rc = func(o *unstructured.Unstructured) bool {
+							return o.Object["status"] == nil
+						}
+					}
+				}
+			}
+			desc = gvkDescriptor{reconciliationCheck: rc}
+		}
+
+		desc.gvks = append(desc.gvks, gvks...)
+		ts.monitoredGvks[typ] = desc
+
 		return nil
 	}
 
@@ -299,8 +331,8 @@ func (ts *TestSetup) BeforeEach(ctx context.Context, cl client.Client, postCondi
 // started (to what BeforeEach stored).
 func (ts *TestSetup) AfterEach(ctx context.Context) {
 	Expect(ts.ensureMonitoredGvks()).To(Succeed())
-	for _, gvks := range ts.monitoredGvks {
-		for _, gvk := range gvks {
+	for _, desc := range ts.monitoredGvks {
+		for _, gvk := range desc.gvks {
 			list := unstructured.UnstructuredList{}
 			list.SetGroupVersionKind(gvk)
 			Expect(ts.client.List(ctx, &list)).To(Succeed())
@@ -322,8 +354,8 @@ func (ts *TestSetup) AfterEach(ctx context.Context) {
 }
 
 func (ts *TestSetup) validateClusterEmpty(ctx context.Context, g Gomega) {
-	for _, gvks := range ts.monitoredGvks {
-		for _, gvk := range gvks {
+	for _, desc := range ts.monitoredGvks {
+		for _, gvk := range desc.gvks {
 			list := unstructured.UnstructuredList{}
 			list.SetGroupVersionKind(gvk)
 			g.Expect(ts.client.List(ctx, &list)).To(Succeed())
@@ -417,17 +449,17 @@ func (ts *TestSetup) settleWithCluster(ctx context.Context, forceReconcile bool,
 	Expect(ts.ensureMonitoredGvks()).To(Succeed())
 
 	waitForStatus := func() {
-		for _, gvks := range ts.monitoredGvks {
-			for _, gvk := range gvks {
-				waitForStatus(ctx, ts.client, gvk)
+		for _, desc := range ts.monitoredGvks {
+			for _, gvk := range desc.gvks {
+				ts.waitForStatus(ctx, ts.client, &desc, gvk)
 			}
 		}
 	}
 
 	loadAll := func() {
 		ts.InCluster.objects = []client.Object{}
-		for _, gvks := range ts.monitoredGvks {
-			for _, gvk := range gvks {
+		for _, desc := range ts.monitoredGvks {
+			for _, gvk := range desc.gvks {
 				ts.loadAll(ctx, gvk)
 			}
 		}
@@ -445,32 +477,40 @@ func (ts *TestSetup) settleWithCluster(ctx context.Context, forceReconcile bool,
 
 	lg := ts.lg(ctx)
 	i := 0
-	var lastReconcile *time.Time
+	var lastReconcileTime *time.Time
 	Eventually(func(g Gomega) {
 		i += 1
 
 		rememberCurrentClusterState()
 
+		shouldReportProgress := lastReconcileTime != nil && time.Since(*lastReconcileTime) > 2*time.Second
+
 		// this loop is usually very fast, so we trigger the reconciliation the first time and then only every 2s to
 		// give the controllers some time to react.
-		if forceReconcile && (lastReconcile == nil || time.Since(*lastReconcile) > 2*time.Second) {
-			if lastReconcile != nil {
+		if lastReconcileTime == nil || shouldReportProgress {
+			if shouldReportProgress {
 				lg.Info("////")
 				lg.Info("////")
 				lg.Info("////")
 				lg.Info("////")
-				lg.Info("//// Reconciliation still in progress after (another) 2s. Triggering it again.")
+				if forceReconcile {
+					lg.Info("//// Cluster state still in progress after (another) 2s. Triggering reconciliation again.")
+				} else {
+					lg.Info("//// Cluster state still in progress after (another) 2s. Postcondition has not passed yet.")
+				}
 				lg.Info("////")
 				lg.Info("////")
 				lg.Info("////")
 				lg.Info("////")
 			}
 
-			for _, o := range ts.InCluster.objects {
-				ts.triggerReconciliation(ctx, g, o)
+			if forceReconcile {
+				for _, o := range ts.InCluster.objects {
+					ts.triggerReconciliation(ctx, g, o)
+				}
 			}
 			now := time.Now()
-			lastReconcile = &now
+			lastReconcileTime = &now
 		}
 
 		waitForStatus()
@@ -498,7 +538,7 @@ func (ts *TestSetup) settleWithCluster(ctx context.Context, forceReconcile bool,
 				lg.Info("~~~~")
 				lg.Info("~~~~")
 				lg.Info("~~~~")
-				lg.Info("settling loop still seeing changes",
+				lg.Info("~~~~ settling loop still seeing changes",
 					"iteration", i,
 					"test", ginkgo.CurrentGinkgoTestDescription().FullTestText,
 					"diffs", diffs,
@@ -515,6 +555,16 @@ func (ts *TestSetup) settleWithCluster(ctx context.Context, forceReconcile bool,
 			g.Expect(true).To(BeFalse())
 			// the cluster state is still evolving, no need to bother with calling postCondition yet
 			return
+		} else if shouldReportProgress {
+			lg.Info("~~~~")
+			lg.Info("~~~~")
+			lg.Info("~~~~")
+			lg.Info("~~~~")
+			lg.Info("~~~~ No change in cluster state detected.")
+			lg.Info("~~~~")
+			lg.Info("~~~~")
+			lg.Info("~~~~")
+			lg.Info("~~~~")
 		}
 
 		if postCondition != nil {
@@ -631,15 +681,8 @@ func (ts *TestSetup) loadAll(ctx context.Context, gvk schema.GroupVersionKind) {
 	}
 }
 
-func waitForStatus(ctx context.Context, cl client.Client, gvk schema.GroupVersionKind) {
-	test, err := cl.Scheme().New(gvk)
-	Expect(err).NotTo(HaveOccurred(), "failed to obtain a new instance of %s from scheme", gvk.String())
-
-	typ := reflect.TypeOf(test).Elem() // All the implementations I know of implement the client.Object interface on the pointer receiver
-	// a crude way of determining that a CRD has a status field
-	_, hasStatusField := typ.FieldByName("Status")
-
-	if !hasStatusField {
+func (ts *TestSetup) waitForStatus(ctx context.Context, cl client.Client, desc *gvkDescriptor, gvk schema.GroupVersionKind) {
+	if desc.reconciliationCheck == nil {
 		return
 	}
 
@@ -650,13 +693,13 @@ func waitForStatus(ctx context.Context, cl client.Client, gvk schema.GroupVersio
 		g.Expect(cl.List(ctx, &list)).To(Succeed())
 
 		for _, o := range list.Items {
-			status := o.Object["status"]
-			g.Expect(status != nil).To(BeTrue(),
-				"object %s of type %s was determined to have status field but its status is empty",
+			shouldReconcile := desc.reconciliationCheck(&o)
+			g.Expect(shouldReconcile).To(BeFalse(),
+				"object %s of type %s was determined need reconciliation",
 				client.ObjectKey{Name: o.GetName(), Namespace: o.GetNamespace()},
 				gvk)
 		}
-	}).Should(Succeed(), "failed to wait for status of objects of type %s", gvk)
+	}).Should(Succeed(), "failed to wait for reconciliation status of objects of type %s", gvk)
 }
 
 func (ts *TestSetup) lg(ctx context.Context) logr.Logger {

@@ -263,5 +263,7 @@ var _ = Describe("BeforeEach", func() {
 		Expect(cl.Get(context.TODO(), client.ObjectKeyFromObject(ts.ToCreate[0]), inCluster)).To(Succeed())
 		Expect(inCluster.ResourceVersion).NotTo(BeEmpty())
 		Expect(ts.ToCreate[0].GetResourceVersion()).To(BeEmpty())
+
+		ts.AfterEach(context.TODO())
 	})
 })
