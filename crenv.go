@@ -59,7 +59,13 @@ type TestSetup struct {
 	// from the state of the object. By default, if the object has a "status" field, then its presence is considered a "proof" of
 	// reconciliation, otherwise no check is performed and the objects are considered reconciled. You can use this map to override
 	// that default behavior. By specifying a custom function which should return true if the reconciliation hasn't happened yet.
-	ReconciliationChecks map[client.Object]func(*unstructured.Unstructured) bool
+	ReconciliationChecks map[schema.GroupKind]func(*unstructured.Unstructured) bool
+
+	// There is no generic way of forcing a reconciliation on a CR. By default Crenv sets a random annotation to a random value
+	// but that might not trigger reconciliation depending on the predicates that are set up by the reconcilers.
+	// If modifying annotations does not trigger reconciliation for some CRD one can use this map to define a function that
+	// will be used to modify the object in such a way that reconciliation should happen.
+	ReconciliationTrigger map[schema.GroupKind]func(client.Object)
 
 	// client to be used in all the methods, set during BeforeEach
 	client client.Client
@@ -107,9 +113,15 @@ func (ts *TestSetup) ensureMonitoredGvks() error {
 		typ := reflect.TypeOf(obj).Elem()
 
 		desc, initialized := ts.monitoredGvks[typ]
-
 		if !initialized {
-			rc := ts.ReconciliationChecks[obj]
+			var rc func(*unstructured.Unstructured) bool
+			for _, gvk := range gvks {
+				gk := gvk.GroupKind()
+				rc := ts.ReconciliationChecks[gk]
+				if rc != nil {
+					break
+				}
+			}
 			if rc == nil {
 				// if the type as a field that's called "status" in JSON, we use its nullity to check if reconciliation might have happened.
 				for i := 0; i < typ.NumField(); i++ {
@@ -221,6 +233,19 @@ func (ts *TestSetup) TriggerReconciliation(ctx context.Context, object client.Ob
 
 func (ts *TestSetup) triggerReconciliation(ctx context.Context, g Gomega, object client.Object) {
 	lg := ts.lg(ctx)
+	gvks, _, err := ts.client.Scheme().ObjectKinds(object)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(gvks).NotTo(BeEmpty())
+
+	var triggerFn func(client.Object)
+	for _, gvk := range gvks {
+		gk := gvk.GroupKind()
+		if fn, ok := ts.ReconciliationTrigger[gk]; ok {
+			triggerFn = fn
+			break
+		}
+	}
+
 	g.Eventually(func(gg Gomega) {
 		// trigger the update of the token to force the reconciliation
 		cpy := object.DeepCopyObject().(client.Object)
@@ -238,12 +263,19 @@ func (ts *TestSetup) triggerReconciliation(ctx context.Context, g Gomega, object
 
 		gg.Expect(err).NotTo(HaveOccurred())
 
-		annos := object.GetAnnotations()
-		if annos == nil {
-			annos = map[string]string{}
+		if triggerFn != nil {
+			lg.Info("found a custom trigger function, calling it")
+			triggerFn(cpy)
+		} else {
+			lg.Info("modifying an annotation in hopes of it triggering the reconciliation")
+			annos := object.GetAnnotations()
+			if annos == nil {
+				annos = map[string]string{}
+			}
+			annos["random-anno-to-trigger-reconcile"] = string(uuid.NewUUID())
+			cpy.SetAnnotations(annos)
 		}
-		annos["random-anno-to-trigger-reconcile"] = string(uuid.NewUUID())
-		cpy.SetAnnotations(annos)
+
 		gg.Expect(ts.client.Update(ctx, cpy)).To(Succeed())
 	}).Should(Succeed())
 
